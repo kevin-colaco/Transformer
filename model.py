@@ -1,5 +1,8 @@
+import datetime
 import inspect
 import math
+import os
+import time
 from dataclasses import dataclass
 
 import torch
@@ -256,7 +259,11 @@ if __name__ == '__main__':
     model.to(device)
     model = torch.compile(model)
     
-    max_step = 50
+    max_step = 20000
+    save_every = 500   # Save checkpoint every N steps
+    checkpoint_dir = "checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     max_lr = 6e-4
     min_lr = max_lr * 0.1
     warmup_steps = 10
@@ -272,10 +279,20 @@ if __name__ == '__main__':
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
 
-    # optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8) # parameters mentioned in GPT-3 paper
     optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
+
+    # Add after model initialization
+    start_step = 0
+    resume_from = "checkpoints/ckpt_step4500_20250511_201159.pt"  # Set to path like "checkpoints/ckpt_step1000.pt" to resume
+
+    if resume_from:
+        checkpoint = torch.load(resume_from, weights_only=False)
+        model.load_state_dict(checkpoint['model_state'])
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+        start_step = checkpoint['step'] + 1
+        print(f"Resumed training from step {start_step}")
     
-    for step in range(max_step):
+    for step in range(start_step, max_step):
         t0 = time.time()
         optimizer.zero_grad()
         loss_accum = 0
@@ -297,15 +314,29 @@ if __name__ == '__main__':
         torch.cuda.synchronize()
         t1 = time.time()
         dt = (t1 - t0) * 1000
-        tokens_per_second = (train_loader.B * train_loader.T * grad_accum_steps) / (t1 - t0)
-        print(f"Step {step} | loss: {loss_accum.item():.6f} | dt: {dt:.2f}ms | tokens/sec: {tokens_per_second:.2f} | norm: {norm:.4f}")
-    import sys; sys.exit(0)
+        tokens_per_second = (train_loader.B * train_loader.T) / (t1 - t0)
+        print(f"Step {step} | loss: {loss.item():.6f} | dt: {dt:.2f}ms | tokens/sec: {tokens_per_second:.2f} | norm: {norm:.4f}")
 
+         # Save checkpoint
+        if step > 0 and step % save_every == 0:
+            checkpoint = {
+                'step': step,
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'loss': loss.item(),
+                'config': model.config
+            }
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            checkpoint_path = os.path.join(checkpoint_dir, f"ckpt_step{step}_{timestamp}.pt")
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Saved checkpoint to {checkpoint_path}")
+
+    torch.save(model.state_dict(), 'final_model.pt')
     model.eval()
     num_return_sequences = 1
     max_length = 100
     enc = tiktoken.get_encoding('gpt2')
-    tokens = enc.encode("Hello, my name is")
+    tokens = enc.encode("Thou art")
     tokens = torch.tensor(tokens, dtype=torch.long)
     tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
     x = tokens.to('cuda')
